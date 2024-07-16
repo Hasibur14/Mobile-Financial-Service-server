@@ -21,154 +21,77 @@ const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology:
 
 async function connectToDatabase() {
   try {
-    // Connect to MongoDB
     await client.connect();
     console.log('Connected to MongoDB');
 
     const db = client.db('mfs');
-    const usersCollection = db.collection('users');
-    const agentsCollection = db.collection('agents');
+    const userCollection = db.collection('user');
+    const adminCollection = db.collection('admin');
+    const agentCollection = db.collection('agent');
 
-    // Helper function for JWT authentication
-    const authenticate = (req, res, next) => {
-      const token = req.header('Authorization');
-      if (!token) return res.status(401).json({ error: 'No token, authorization denied' });
+    // JWT generation endpoint
+    app.post('/jwt', (req, res) => {
+      const user = req.body;
+      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '24h' });
+      res.send({ token });
+    });
 
-      try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded;
-        next();
-      } catch (error) {
-        res.status(400).json({ error: 'Token is not valid' });
+    // Middleware to verify token
+    const verifyToken = (req, res, next) => {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).send({ message: 'Unauthorized access' });
       }
+      const token = authHeader.split(' ')[1];
+      jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+        if (err) {
+          return res.status(401).send({ message: 'Unauthorized access' });
+        }
+        req.decoded = decoded;
+        next();
+      });
     };
 
-    // Routes
-    app.post('/api/users/register', async (req, res) => {
+    // Registration Route
+    app.post('/register', async (req, res) => {
+      const { name, pin, mobileNumber, email } = req.body;
+
       try {
-        const { name, pin, mobileNumber, email } = req.body;
-        const hashedPin = await bcrypt.hash(pin, 10);
-        const newUser = {
-          name,
-          pin: hashedPin,
-          mobileNumber,
-          email,
-          status: 'pending',
-          balance: 0,
-        };
-        await usersCollection.insertOne(newUser);
-        res.status(201).json({ message: 'User registered successfully!' });
+        // Hash the PIN
+        const salt = await bcrypt.genSalt(10);
+        const hashedPin = await bcrypt.hash(pin, salt);
+
+        // Create new user
+        const newUser = { name, pin: hashedPin, mobileNumber, email };
+
+        // Save user to the database
+        const result = await userCollection.insertOne(newUser);
+        res.status(201).json({ message: 'User registered successfully', userId: result.insertedId });
       } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Server error' });
       }
     });
 
-    app.post('/api/users/login', async (req, res) => {
-      try {
-        const { identifier, pin } = req.body;
-        const user = await usersCollection.findOne({
-          $or: [{ mobileNumber: identifier }, { email: identifier }]
-        });
-        if (!user) return res.status(400).json({ error: 'User not found!' });
+    // Login Route
+    app.post('/login', async (req, res) => {
+      const { mobileNumber, pin } = req.body;
 
+      try {
+        // Find user by mobile number
+        const user = await userCollection.findOne({ mobileNumber });
+        if (!user) return res.status(400).json({ error: 'Invalid credentials' });
+
+        // Check PIN
         const isMatch = await bcrypt.compare(pin, user.pin);
-        if (!isMatch) return res.status(400).json({ error: 'Invalid PIN!' });
+        if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
 
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-        res.status(200).json({ token });
+        // Generate JWT
+        const payload = { id: user._id, name: user.name };
+        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' });
+
+        res.json({ token });
       } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    });
-
-    app.get('/api/users/balance', authenticate, async (req, res) => {
-      try {
-        const user = await usersCollection.findOne({ _id: ObjectId(req.user.id) });
-        res.status(200).json({ balance: user.balance });
-      } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    });
-
-    app.post('/api/agents/register', async (req, res) => {
-      try {
-        const { name, pin, mobileNumber, email } = req.body;
-        const hashedPin = await bcrypt.hash(pin, 10);
-        const newAgent = {
-          name,
-          pin: hashedPin,
-          mobileNumber,
-          email,
-          status: 'pending',
-          balance: 0,
-        };
-        await agentsCollection.insertOne(newAgent);
-        res.status(201).json({ message: 'Agent registered successfully!' });
-      } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    });
-
-    app.post('/api/agents/login', async (req, res) => {
-      try {
-        const { identifier, pin } = req.body;
-        const agent = await agentsCollection.findOne({
-          $or: [{ mobileNumber: identifier }, { email: identifier }]
-        });
-        if (!agent) return res.status(400).json({ error: 'Agent not found!' });
-
-        const isMatch = await bcrypt.compare(pin, agent.pin);
-        if (!isMatch) return res.status(400).json({ error: 'Invalid PIN!' });
-
-        const token = jwt.sign({ id: agent._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-        res.status(200).json({ token });
-      } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    });
-
-    app.get('/api/agents/balance', authenticate, async (req, res) => {
-      try {
-        const agent = await agentsCollection.findOne({ _id: ObjectId(req.user.id) });
-        res.status(200).json({ balance: agent.balance });
-      } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    });
-
-    app.post('/api/admin/login', async (req, res) => {
-      try {
-        const { identifier, pin } = req.body;
-        const admin = await db.collection('admins').findOne({
-          $or: [{ mobileNumber: identifier }, { email: identifier }]
-        });
-        if (!admin) return res.status(400).json({ error: 'Admin not found!' });
-
-        const isMatch = await bcrypt.compare(pin, admin.pin);
-        if (!isMatch) return res.status(400).json({ error: 'Invalid PIN!' });
-
-        const token = jwt.sign({ id: admin._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-        res.status(200).json({ token });
-      } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    });
-
-    app.get('/api/admin/users', authenticate, async (req, res) => {
-      try {
-        const users = await usersCollection.find().toArray();
-        res.status(200).json(users);
-      } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-      }
-    });
-
-    app.get('/api/admin/agents', authenticate, async (req, res) => {
-      try {
-        const agents = await agentsCollection.find().toArray();
-        res.status(200).json(agents);
-      } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Server error' });
       }
     });
 

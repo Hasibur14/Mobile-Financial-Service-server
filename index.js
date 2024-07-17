@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { MongoClient, ObjectId } = require('mongodb');
+const { MongoClient } = require('mongodb');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -26,8 +26,6 @@ async function connectToDatabase() {
 
     const db = client.db('mfs');
     const userCollection = db.collection('user');
-    const adminCollection = db.collection('admin');
-    const agentCollection = db.collection('agent');
 
     // JWT generation endpoint
     app.post('/jwt', (req, res) => {
@@ -57,12 +55,27 @@ async function connectToDatabase() {
       const { name, pin, mobileNumber, email } = req.body;
 
       try {
+        // Check if user already exists
+        const existingUser = await userCollection.findOne({
+          $or: [{ mobileNumber }, { email }]
+        });
+        if (existingUser) {
+          return res.status(400).json({ error: 'User already exists' });
+        }
+
         // Hash the PIN
         const salt = await bcrypt.genSalt(10);
         const hashedPin = await bcrypt.hash(pin, salt);
 
         // Create new user
-        const newUser = { name, pin: hashedPin, mobileNumber, email };
+        const newUser = {
+          name,
+          pin: hashedPin,
+          mobileNumber,
+          email,
+          role: 'user',
+          status: 'active'
+        };
 
         // Save user to the database
         const result = await userCollection.insertOne(newUser);
@@ -74,11 +87,13 @@ async function connectToDatabase() {
 
     // Login Route
     app.post('/login', async (req, res) => {
-      const { mobileNumber, pin } = req.body;
+      const { identifier, pin } = req.body; // `identifier` can be either mobileNumber or email
 
       try {
-        // Find user by mobile number
-        const user = await userCollection.findOne({ mobileNumber });
+        // Find user by mobile number or email
+        const user = await userCollection.findOne({
+          $or: [{ mobileNumber: identifier }, { email: identifier }]
+        });
         if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
         // Check PIN
@@ -86,14 +101,27 @@ async function connectToDatabase() {
         if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
 
         // Generate JWT
-        const payload = { id: user._id, name: user.name };
-        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' });
+        const payload = { id: user._id, name: user.name, role: user.role };
+        const token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '12h' });
 
         res.json({ token });
       } catch (error) {
         res.status(500).json({ error: 'Server error' });
       }
     });
+
+    // Get all users with a specific role
+    app.get('/users/:role', async (req, res) => {
+      const role = req.params.role;
+      const users = await userCollection.find({ role }).toArray();
+      res.send(users);
+    });
+
+
+
+
+
+
 
     // Root Route
     app.get('/', (req, res) => {
